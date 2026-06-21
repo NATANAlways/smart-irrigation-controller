@@ -13,6 +13,7 @@ from irrigation.crops import get_crop_profile
 from irrigation.rl.agent import QLearningAgent
 from irrigation.rl.environment import IrrigationEnvironment
 from irrigation.sensors.base import SensorInterface
+from irrigation.zone_config import ZoneConfig
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ def _build_components(
                 )
 
         sensor = _CombinedSimSensor()
-        actuator = SimulatedActuator(soil_sensor=sensor.soil)
+        actuator = SimulatedActuator(soil_sensor=sensor.soil, zone=ZoneConfig())
         return sensor, actuator
 
     # Real hardware path.

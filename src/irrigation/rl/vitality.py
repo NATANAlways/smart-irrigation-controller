@@ -154,6 +154,11 @@ class PlantVitalityTracker:
             return 0.0
         return DEATH_PENALTY.get(self._death_stage, -50.0)
 
+    @property
+    def consecutive_wet_hours(self) -> int:
+        """Current count of consecutive hours above field capacity."""
+        return self._consecutive_wet
+
     def death_info(self) -> dict:
         """Return death event details for the info dict."""
         return {

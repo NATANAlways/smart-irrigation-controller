@@ -35,7 +35,7 @@ from irrigation.crops.chili import ChiliProfile
 from irrigation.rl.dynamic_stage import DynamicStageTracker
 from irrigation.rl.environment import IrrigationEnvironment
 from irrigation.rl.health_tracker import PlantHealthTracker
-from irrigation.rl.vitality import PlantVitalityTracker
+from irrigation.rl.vitality import VITALITY_CONFIGS, PlantVitalityTracker
 from irrigation.sensors.historical import HistoricalWeatherSensor
 from irrigation.sensors.simulation import SimulatedSoilMoistureSensor
 from irrigation.weather.weather_data import WeatherDataLoader
@@ -84,16 +84,18 @@ class IrrigationGymEnv(gymnasium.Env):
 
         # Death-disabled warm-up — see config.yaml training.death_warmup_steps.
         # Counts total steps taken by this env instance (not reset per episode).
-        self.death_warmup_steps = death_warmup_steps
-        self._total_steps       = 0
+        self.death_warmup_steps  = death_warmup_steps
+        self._total_steps        = 0
+        self._last_is_raining: bool = False  # rain delay guard state
 
         # Continuous action: fraction of max irrigation volume.
         self.action_space = spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32)
 
-        # 9 normalized continuous observation values, all in [0, 1].
-        # [moisture, temp, humidity, hour, is_raining, stage, day, health, vitality]
+        # 10 normalized continuous observation values, all in [0, 1].
+        # [moisture, temp, humidity, hour, is_raining, stage, day, health, vitality, waterlog_risk]
+        # waterlog_risk = consecutive_wet_hours / wet_hours_limit (0=safe, 1=dead)
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(9,), dtype=np.float32
+            low=0.0, high=1.0, shape=(10,), dtype=np.float32
         )
 
         # Load real NASA POWER weather data
@@ -105,17 +107,22 @@ class IrrigationGymEnv(gymnasium.Env):
 
         # Historical weather sensor — replaces SimulatedWeatherSensor
         # Feeds real ET₀ to soil sensor each step
+        # Use germination field capacity (most restrictive stage) as the
+        # drainage cap for rain — soil can't exceed field capacity in a
+        # well-drained raised bed regardless of rainfall intensity.
+        _field_cap = self.crop.moisture_thresholds_for_stage(0).field_capacity
         self._sensor = HistoricalWeatherSensor(
             loader=self._loader,
             soil_sensor=self._soil_sensor,
             zone=self.zone,
             training_phase=training_phase,
             episode_hours=self._max_steps,
+            field_capacity_pct=_field_cap,
         )
 
         self._actuator = SimulatedActuator(
             soil_sensor=self._soil_sensor,
-            moisture_per_litre=self.zone.moisture_per_litre,
+            zone=self.zone,
         )
         self._env = IrrigationEnvironment(
             sensor=self._sensor,
@@ -131,13 +138,17 @@ class IrrigationGymEnv(gymnasium.Env):
         self._vitality_tracker = PlantVitalityTracker(self.crop)
 
     def _make_obs(self, state) -> np.ndarray:
-        """Build (9,) observation: 7 env values + health_score + vitality."""
+        """Build (10,) observation: 7 env values + health_score + vitality + waterlog_risk."""
         base_obs = np.clip(
             state.to_observation(self.crop.growing_season_days), 0.0, 1.0
         )
+        current_stage = self._stage_tracker.current_stage
+        wet_limit = VITALITY_CONFIGS[current_stage].wet_hours_limit
+        wet_risk = float(self._vitality_tracker.consecutive_wet_hours) / max(1, wet_limit)
         extras = np.array(
             [self._health_tracker.health_score,
-             self._vitality_tracker.vitality],
+             self._vitality_tracker.vitality,
+             min(1.0, wet_risk)],
             dtype=np.float32,
         )
         return np.concatenate([base_obs, extras])
@@ -159,9 +170,10 @@ class IrrigationGymEnv(gymnasium.Env):
         self._sensor.reset(initial_moisture_pct=initial_moisture, initial_hour=6.0)
         self._actuator.reset()
 
-        self._step = 0
-        self._env._sim_day   = 0
-        self._env._sim_stage = 0
+        self._step            = 0
+        self._last_is_raining = False
+        self._env._sim_day    = 0
+        self._env._sim_stage  = 0
         self._env._last_reading = None
         self._health_tracker.reset()
         self._stage_tracker.reset()
@@ -179,6 +191,16 @@ class IrrigationGymEnv(gymnasium.Env):
         # Map agent output [0, 1] → [0, max_litres_per_event].
         water_fraction = float(np.clip(action[0], 0.0, 1.0))
         water_litres   = water_fraction * self.zone.max_litres_per_event
+
+        # Rain delay guard: if it was raining last step and soil is already above
+        # optimal moisture, force irrigation to zero. This mirrors the rain sensor
+        # found in real irrigation controllers. A Gaussian PPO policy cannot
+        # reliably output exactly 0.0, so spurious micro-irrigation during
+        # multi-day monsoon rain would otherwise accumulate above field capacity.
+        stage_for_guard = self._stage_tracker.current_stage
+        t_guard = self.crop.moisture_thresholds_for_stage(stage_for_guard)
+        if self._last_is_raining and self._soil_sensor.moisture_pct > t_guard.optimal_max:
+            water_litres = 0.0
 
         next_state, reward, _ = self._env.step(water_litres)
         self._step += 1
@@ -232,6 +254,9 @@ class IrrigationGymEnv(gymnasium.Env):
             "vitality":       self._vitality_tracker.vitality,
             "phase":          self.training_phase,
         }
+
+        # Update rain delay state for next step.
+        self._last_is_raining = next_state.is_raining
 
         # At episode end add full summaries from all trackers.
         if terminated:

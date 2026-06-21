@@ -104,7 +104,7 @@ class TestIrrigationEnvironment:
 
     def test_observation_size(self):
         env = _make_env()
-        assert env.observation_size == 7
+        assert env.observation_size == 10
 
     def test_sim_day_override(self):
         env = _make_env()

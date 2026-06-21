@@ -44,12 +44,14 @@ class HistoricalWeatherSensor(SensorInterface):
         zone: ZoneConfig,
         training_phase: int = 1,
         episode_hours: int = 3600,
+        field_capacity_pct: float = 85.0,
     ) -> None:
-        self.loader         = loader
-        self.soil_sensor    = soil_sensor
-        self.zone           = zone
-        self.training_phase = training_phase
-        self.episode_hours  = episode_hours
+        self.loader              = loader
+        self.soil_sensor         = soil_sensor
+        self.zone                = zone
+        self.training_phase      = training_phase
+        self.episode_hours       = episode_hours
+        self._field_capacity_pct = field_capacity_pct
 
         self._index: int = 0
 
@@ -85,7 +87,7 @@ class HistoricalWeatherSensor(SensorInterface):
         self.soil_sensor.et_rate_per_hour = et_rate
 
         if record.is_raining and record.rain_mm > 0:
-            self.soil_sensor.apply_rain(record.rain_mm)
+            self.soil_sensor.apply_rain(record.rain_mm, cap_pct=self._field_capacity_pct)
 
         soil = self.soil_sensor.read()
 

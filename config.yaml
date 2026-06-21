@@ -48,7 +48,7 @@ stages:
     health_required: 0.70       # 70% of hours must be in optimal moisture range
     dry_threshold: wilting_point  # Death triggered at wilting point (20%)
     dry_hours_limit: 2          # 2 consecutive dry hours → plant dies (no roots)
-    wet_hours_limit: 4          # 4 consecutive waterlogged hours → root rot
+    wet_hours_limit: 12         # 12 consecutive waterlogged hours → root rot
     vitality_drain: 0.20        # Vitality lost per stressed hour (fast drain)
 
   vegetative:                   # Stage 1 — young roots establishing
@@ -106,11 +106,11 @@ reward:
 
   # Penalty for soil moisture above field capacity (waterlogging)
   # Applied as: overwater_penalty × (excess_moisture / 10)
-  overwater_penalty: 2.0
+  overwater_penalty: 5.0
 
   # Bonus reward for NOT irrigating when it is raining
   # Teaches the agent to use rain as free water
-  rain_bonus: 0.5
+  rain_bonus: 2.0
 
   # Terminal reward added to final step reward when plant dies
   # Earlier death = larger penalty (more season wasted)
@@ -128,9 +128,9 @@ reward:
 training:
   total_timesteps: 500000   # Total environment steps across all three phases
   n_envs: 4                 # Parallel environments for faster data collection
-  phase1_ratio: 0.25        # Phase 1 (Yala only):  25% = 125,000 steps
-  phase2_ratio: 0.35        # Phase 2 (Maha only):  35% = 175,000 steps
-  phase3_ratio: 0.40        # Phase 3 (Both, random year per month): 40% = 200,000 steps
+  phase1_ratio: 1        # Phase 1 (Yala only):  25% = 125,000 steps
+  phase2_ratio: 0        # Phase 2 (Maha only):  35% = 175,000 steps
+  phase3_ratio: 0        # Phase 3 (Both, random year per month): 40% = 200,000 steps
   log_interval: 10          # Print episode summary every N episodes
   step_hours: 1.0           # Simulated hours per step (matches hourly NASA data)
 
@@ -140,7 +140,7 @@ training:
   # reward, so the agent gets the signal, but it can keep experiencing
   # later growth stages while its policy is still close to random.
   # Agronomic death thresholds (config.stages.*) are left untouched.
-  death_warmup_steps: 20000
+  death_warmup_steps: 0
 
 
 # -----------------------------------------------------------------------------
@@ -171,3 +171,30 @@ ppo:
 
   clip_range: 0.2           # PPO clipping — limits how much policy changes per update
                             # Standard value, rarely needs changing
+
+
+# -----------------------------------------------------------------------------
+# SAC — Soft Actor-Critic hyperparameters (off-policy, replay-buffer based)
+# Unlike PPO, SAC stores past transitions in a replay buffer and reuses them
+# across many gradient updates, instead of discarding data after one pass.
+# More sample-efficient when episodes are short (e.g. early-training deaths).
+# -----------------------------------------------------------------------------
+sac:
+  learning_rate: 0.0003     # Same role as PPO's learning_rate
+
+  buffer_size: 200000       # Max transitions kept in the replay buffer
+                            # ~55 full episodes worth (3600 steps each)
+
+  learning_starts: 7200     # Steps of random exploration before training starts
+                            # 2 episodes — lets the buffer fill with diverse data first
+
+  batch_size: 256           # Transitions sampled from the buffer per gradient step
+                            # Sampled randomly from buffer_size, not sequential
+
+  train_freq: 1             # Run a gradient step every N environment steps
+
+  gradient_steps: 1         # Gradient updates performed per train_freq trigger
+
+  gamma: 0.995              # Same discount factor reasoning as PPO
+
+  tau: 0.005                # Target network soft-update rate (standard SAC default)

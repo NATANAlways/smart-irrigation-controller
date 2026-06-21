@@ -29,7 +29,7 @@ _DEFAULT_CSV = (
 
 # Jaffna season month groups for curriculum learning
 YALA_MONTHS = [1, 2, 3]   # Jan, Feb, Mar — dry season planting window
-MAHA_MONTHS = [8, 9]      # Aug, Sep — Northeast monsoon planting window
+MAHA_MONTHS = [10, 11]    # Oct, Nov — Maha season actual planting window (post-monsoon onset)
 
 
 class WeatherRecord(NamedTuple):

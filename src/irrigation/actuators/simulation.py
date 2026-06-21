@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from irrigation.actuators.base import ActuatorInterface, IrrigationCommand
+from irrigation.zone_config import ZoneConfig
 
 
 @dataclass
@@ -24,18 +25,17 @@ class SimulatedActuator(ActuatorInterface):
 
     Args:
         soil_sensor: Optional simulated soil sensor to update on irrigation.
-        moisture_per_litre: Soil moisture % increase per litre applied.
-            Default 0.1 matches a 3m² zone with 0.3m root depth at 90% efficiency.
-            Formula: (efficiency / (area_m2 × root_depth_m × 1000)) × 100
+        zone: Zone configuration used to derive moisture_per_litre. Defaults
+            to ZoneConfig() so the value always reflects the current config.
     """
 
     def __init__(
         self,
         soil_sensor: object | None = None,
-        moisture_per_litre: float = 0.1,
+        zone: ZoneConfig | None = None,
     ) -> None:
         self.soil_sensor = soil_sensor
-        self.moisture_per_litre = moisture_per_litre
+        self.zone = zone or ZoneConfig()
         self._active: bool = False
         self.history: list[IrrigationEvent] = []
         self.total_water_used_litres: float = 0.0
@@ -54,7 +54,7 @@ class SimulatedActuator(ActuatorInterface):
         self.total_water_used_litres += command.water_litres
 
         if self.soil_sensor is not None and hasattr(self.soil_sensor, "irrigate"):
-            self.soil_sensor.irrigate(command.water_litres * self.moisture_per_litre)
+            self.soil_sensor.irrigate(command.water_litres * self.zone.moisture_per_litre)
 
         self._active = False
 

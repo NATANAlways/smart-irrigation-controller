@@ -25,7 +25,7 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.env_util import make_vec_env
 
@@ -39,12 +39,53 @@ from irrigation.zone_config import ZoneConfig
 _cfg   = load_config()
 _train = _cfg["training"]
 _ppo   = _cfg["ppo"]
+_sac   = _cfg["sac"]
+
+
+def _build_model(algo: str, env, output_path: Path):
+    """Construct a fresh PPO or SAC model.
+
+    SAC is off-policy and keeps a replay buffer of past transitions that it
+    samples from on every gradient step, instead of PPO's on-policy rollout
+    buffer which is discarded after each update.
+    """
+    if algo == "ppo":
+        return PPO(
+            "MlpPolicy",
+            env,
+            learning_rate  = _ppo["learning_rate"],
+            n_steps        = _ppo["n_steps"],
+            batch_size     = _ppo["batch_size"],
+            n_epochs       = _ppo["n_epochs"],
+            gamma          = _ppo["gamma"],
+            gae_lambda     = _ppo["gae_lambda"],
+            clip_range     = _ppo["clip_range"],
+            verbose        = 1,
+            tensorboard_log= str(output_path / "logs"),
+        )
+    if algo == "sac":
+        return SAC(
+            "MlpPolicy",
+            env,
+            learning_rate    = _sac["learning_rate"],
+            buffer_size      = _sac["buffer_size"],
+            learning_starts  = _sac["learning_starts"],
+            batch_size       = _sac["batch_size"],
+            train_freq       = _sac["train_freq"],
+            gradient_steps   = _sac["gradient_steps"],
+            gamma            = _sac["gamma"],
+            tau              = _sac["tau"],
+            verbose          = 1,
+            tensorboard_log  = str(output_path / "logs"),
+        )
+    raise ValueError(f"Unknown algorithm: {algo!r} (expected 'ppo' or 'sac')")
 
 
 def _make_callbacks(
     output_path: Path,
     eval_env,
     log_interval: int,
+    algo: str,
 ) -> list:
     return [
         EvalCallback(
@@ -57,7 +98,7 @@ def _make_callbacks(
         CheckpointCallback(
             save_freq=50_000,
             save_path=str(output_path / "checkpoints"),
-            name_prefix="ppo_irrigation",
+            name_prefix=f"{algo}_irrigation",
         ),
         IrrigationMonitorCallback(log_interval=log_interval, verbose=1),
         WandbCallback(verbose=0), 
@@ -74,29 +115,32 @@ def train(
     phase2_ratio: float   = _train["phase2_ratio"],
     phase3_ratio: float   = _train["phase3_ratio"],
     log_interval: int     = _train["log_interval"],
+    algo: str             = "ppo",
 ) -> None:
-    
-    
+
+
     zone = ZoneConfig(area_m2=area_m2, irrigation_type=irrigation_type)
     today = datetime.now().strftime("%Y-%m-%d")
     output_path = Path(output_dir) / today
     output_path.mkdir(parents=True, exist_ok=True)
 
+    algo_cfg = _ppo if algo == "ppo" else _sac
     run = wandb.init(
         project="smart-irrigation-controller",
         config={
+            "algo": algo,
             "total_timesteps": total_timesteps,
             "n_envs": n_envs,
             "phase1_ratio": phase1_ratio,
             "phase2_ratio": phase2_ratio,
             "phase3_ratio": phase3_ratio,
-            "learning_rate": _ppo["learning_rate"],
-            "gamma": _ppo["gamma"],
-            "n_steps": _ppo["n_steps"],
-            "batch_size": _ppo["batch_size"],
-            "clip_range": _ppo["clip_range"],
+            "learning_rate": algo_cfg["learning_rate"],
+            "gamma": algo_cfg["gamma"],
             "area_m2": area_m2,
             "irrigation_type": irrigation_type,
+            **({"n_steps": _ppo["n_steps"], "batch_size": _ppo["batch_size"], "clip_range": _ppo["clip_range"]}
+               if algo == "ppo" else
+               {"buffer_size": _sac["buffer_size"], "batch_size": _sac["batch_size"], "learning_starts": _sac["learning_starts"]}),
         },
         sync_tensorboard=True,
     )
@@ -106,7 +150,7 @@ def train(
     phase3_steps = total_timesteps - phase1_steps - phase2_steps
 
     print("=" * 62)
-    print("  PPO Smart Irrigation — 3-Phase Curriculum Learning")
+    print(f"  {algo.upper()} Smart Irrigation — 3-Phase Curriculum Learning")
     print("=" * 62)
     print(f"  Zone          : {area_m2}m²  {irrigation_type}  ({zone.efficiency*100:.0f}% efficiency)")
     print(f"  Total steps   : {total_timesteps:,}")
@@ -128,69 +172,63 @@ def train(
     train_env_p1 = make_vec_env(IrrigationGymEnv, n_envs=n_envs, env_kwargs=phase1_kwargs)
     eval_env_p1  = make_vec_env(IrrigationGymEnv, n_envs=1,      env_kwargs=phase1_kwargs)
 
-    model = PPO(
-        "MlpPolicy",
-        train_env_p1,
-        learning_rate  = _ppo["learning_rate"],
-        n_steps        = _ppo["n_steps"],
-        batch_size     = _ppo["batch_size"],
-        n_epochs       = _ppo["n_epochs"],
-        gamma          = _ppo["gamma"],
-        gae_lambda     = _ppo["gae_lambda"],
-        clip_range     = _ppo["clip_range"],
-        verbose        = 1,
-        tensorboard_log= str(output_path / "logs"),
-    )
+    model = _build_model(algo, train_env_p1, output_path)
 
     model.learn(
         total_timesteps=phase1_steps,
-        callback=_make_callbacks(output_path / "phase1", eval_env_p1, log_interval),
+        callback=_make_callbacks(output_path / "phase1", eval_env_p1, log_interval, algo),
         reset_num_timesteps=True,
     )
 
-    phase1_save = output_path / "ppo_phase1_yala"
+    phase1_save = output_path / f"{algo}_phase1_yala"
     model.save(str(phase1_save))
     print(f"\n[PHASE 1] Complete — model saved to {phase1_save}")
 
     # ------------------------------------------------------------------
-    # Phase 2 — Maha season (Aug/Sep start, fixed year, sequential months)
+    # Phase 2 — Maha season (Oct/Nov start, monsoon conditions)
     # ------------------------------------------------------------------
-    print("\n[PHASE 2] Maha season — monsoon conditions, Aug/Sep planting...")
+    if phase2_steps > 0:
+        print("\n[PHASE 2] Maha season — monsoon conditions, Oct/Nov planting...")
 
-    phase2_kwargs = {"zone": zone, "training_phase": 2}
-    train_env_p2 = make_vec_env(IrrigationGymEnv, n_envs=n_envs, env_kwargs=phase2_kwargs)
-    eval_env_p2  = make_vec_env(IrrigationGymEnv, n_envs=1,      env_kwargs=phase2_kwargs)
+        phase2_kwargs = {"zone": zone, "training_phase": 2}
+        train_env_p2 = make_vec_env(IrrigationGymEnv, n_envs=n_envs, env_kwargs=phase2_kwargs)
+        eval_env_p2  = make_vec_env(IrrigationGymEnv, n_envs=1,      env_kwargs=phase2_kwargs)
 
-    model.set_env(train_env_p2)
-    model.learn(
-        total_timesteps=phase2_steps,
-        callback=_make_callbacks(output_path / "phase2", eval_env_p2, log_interval),
-        reset_num_timesteps=False,
-    )
+        model.set_env(train_env_p2)
+        model.learn(
+            total_timesteps=phase2_steps,
+            callback=_make_callbacks(output_path / "phase2", eval_env_p2, log_interval, algo),
+            reset_num_timesteps=False,
+        )
 
-    phase2_save = output_path / "ppo_phase2_maha"
-    model.save(str(phase2_save))
-    print(f"\n[PHASE 2] Complete — model saved to {phase2_save}")
+        phase2_save = output_path / f"{algo}_phase2_maha"
+        model.save(str(phase2_save))
+        print(f"\n[PHASE 2] Complete — model saved to {phase2_save}")
+    else:
+        print("\n[PHASE 2] Skipped (phase2_ratio = 0)")
 
     # ------------------------------------------------------------------
     # Phase 3 — Both seasons, random year per month (maximum variability)
     # ------------------------------------------------------------------
-    print("\n[PHASE 3] Both seasons — random year per month, full variability...")
+    if phase3_steps > 0:
+        print("\n[PHASE 3] Both seasons — random year per month, full variability...")
 
-    phase3_kwargs = {"zone": zone, "training_phase": 3}
-    train_env_p3 = make_vec_env(IrrigationGymEnv, n_envs=n_envs, env_kwargs=phase3_kwargs)
-    eval_env_p3  = make_vec_env(IrrigationGymEnv, n_envs=1,      env_kwargs=phase3_kwargs)
+        phase3_kwargs = {"zone": zone, "training_phase": 3}
+        train_env_p3 = make_vec_env(IrrigationGymEnv, n_envs=n_envs, env_kwargs=phase3_kwargs)
+        eval_env_p3  = make_vec_env(IrrigationGymEnv, n_envs=1,      env_kwargs=phase3_kwargs)
 
-    model.set_env(train_env_p3)
-    model.learn(
-        total_timesteps=phase3_steps,
-        callback=_make_callbacks(output_path / "phase3", eval_env_p3, log_interval),
-        reset_num_timesteps=False,
-    )
+        model.set_env(train_env_p3)
+        model.learn(
+            total_timesteps=phase3_steps,
+            callback=_make_callbacks(output_path / "phase3", eval_env_p3, log_interval, algo),
+            reset_num_timesteps=False,
+        )
 
-    final_save = output_path / "ppo_irrigation_final"
-    model.save(str(final_save))
-    print(f"\n[PHASE 3] Complete — final model saved to {final_save}")
+        final_save = output_path / f"{algo}_irrigation_final"
+        model.save(str(final_save))
+        print(f"\n[PHASE 3] Complete — final model saved to {final_save}")
+    else:
+        print("\n[PHASE 3] Skipped (phase3_ratio = 0)")
     print("\nTraining complete.")
     run.finish()
 
@@ -199,21 +237,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train PPO irrigation agent with curriculum learning."
     )
-    parser.add_argument("--timesteps",       type=int,   default=500_000)
-    parser.add_argument("--n-envs",          type=int,   default=4)
+    parser.add_argument("--timesteps",       type=int,   default=_train["total_timesteps"])
+    parser.add_argument("--n-envs",          type=int,   default=_train["n_envs"])
     parser.add_argument("--output-dir",      type=str,   default="models")
-    parser.add_argument("--area",            type=float, default=3.0,
+    parser.add_argument("--area",            type=float, default=_cfg["zone"]["area_m2"],
                         help="Zone area in m²")
-    parser.add_argument("--irrigation-type", type=str,  default="drip",
+    parser.add_argument("--irrigation-type", type=str,  default=_cfg["zone"]["irrigation_type"],
                         choices=["drip", "sprinkler"])
-    parser.add_argument("--phase1-ratio",    type=float, default=0.25,
+    parser.add_argument("--phase1-ratio",    type=float, default=_train["phase1_ratio"],
                         help="Fraction of timesteps for Phase 1 — Yala season")
-    parser.add_argument("--phase2-ratio",    type=float, default=0.35,
+    parser.add_argument("--phase2-ratio",    type=float, default=_train["phase2_ratio"],
                         help="Fraction of timesteps for Phase 2 — Maha season")
-    parser.add_argument("--phase3-ratio",    type=float, default=0.40,
+    parser.add_argument("--phase3-ratio",    type=float, default=_train["phase3_ratio"],
                         help="Fraction of timesteps for Phase 3 — both seasons")
-    parser.add_argument("--log-interval",    type=int,   default=10,
+    parser.add_argument("--log-interval",    type=int,   default=_train["log_interval"],
                         help="Print episode summary every N episodes")
+    parser.add_argument("--algo",            type=str,   default="ppo", choices=["ppo", "sac"],
+                        help="RL algorithm — 'sac' uses a replay buffer to reuse past transitions")
     args = parser.parse_args()
 
     train(
@@ -226,4 +266,5 @@ if __name__ == "__main__":
         args.phase2_ratio,
         args.phase3_ratio,
         args.log_interval,
+        args.algo,
     )

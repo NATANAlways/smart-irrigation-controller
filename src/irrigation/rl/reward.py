@@ -93,10 +93,18 @@ class RewardFunction:
         if is_raining and command.water_litres == 0.0:
             reward += self.rain_bonus
 
+        # Pre-waterlogging penalty: penalise irrigating when moisture is already
+        # above optimal_max during rain. Scales 0→1 between optimal_max and
+        # field_capacity. Teaches the agent to stop before reaching the death zone.
+        if is_raining and command.water_litres > 0.0 and soil_moisture_pct > t.optimal_max:
+            danger_range = max(1.0, t.field_capacity - t.optimal_max)
+            danger_ratio = min(1.0, (soil_moisture_pct - t.optimal_max) / danger_range)
+            reward -= self.overwater_penalty * danger_ratio * water_fraction
+
         # Emergency penalty: soil critically dry but agent applied too little.
         if (
             soil_moisture_pct <= t.wilting_point
-            and 0.0 < command.water_litres < self.zone.emergency_min_litres
+            and command.water_litres < self.zone.emergency_min_litres
         ):
             reward -= 5.0
 

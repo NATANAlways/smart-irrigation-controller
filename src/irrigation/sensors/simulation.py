@@ -67,13 +67,17 @@ class SimulatedSoilMoistureSensor:
         """
         self._moisture = min(100.0, self._moisture + amount_pct)
 
-    def apply_rain(self, rainfall_mm: float) -> None:
+    def apply_rain(self, rainfall_mm: float, cap_pct: float = 100.0) -> None:
         """Increase moisture as if rain fell (1 mm ≈ 0.5 % moisture).
 
         Args:
             rainfall_mm: Rainfall in millimetres.
+            cap_pct: Maximum moisture after rain. Pass field_capacity so that
+                rainfall drains away above saturation (physically correct for
+                a raised bed). Defaults to 100.0 to preserve legacy behaviour
+                when cap is not specified.
         """
-        self._moisture = min(100.0, self._moisture + rainfall_mm * 0.5)
+        self._moisture = min(cap_pct, self._moisture + rainfall_mm * 0.5)
 
     def reset(self, initial_moisture_pct: float = 50.0, initial_hour: float = 6.0) -> None:
         """Reset moisture and simulated clock for a new training episode."""

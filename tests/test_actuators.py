@@ -55,7 +55,7 @@ class TestSimulatedActuator:
 
     def test_updates_soil_sensor(self):
         soil = SimulatedSoilMoistureSensor(initial_moisture_pct=30.0, seed=42)
-        actuator = SimulatedActuator(soil_sensor=soil, moisture_per_litre=0.1)
+        actuator = SimulatedActuator(soil_sensor=soil)
         before = soil.moisture_pct
         actuator.execute(IrrigationCommand(water_litres=10.0))
         assert soil.moisture_pct > before
